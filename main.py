@@ -6,6 +6,9 @@ import pdfkit
 from forex_python.converter import CurrencyRates
 from phonenumbers import parse, is_valid_number
 from decimal import Decimal
+from reportlab.pdfgen import canvas
+from io import BytesIO
+from fastapi.responses import Response
 
 app = FastAPI()
 api_key_header = APIKeyHeader(name="X-API-KEY")
@@ -25,18 +28,48 @@ class EmailValidationRequest(BaseModel):
 
 @app.post("/validate-email")
 def validate_email(request: EmailValidationRequest, api_key: str = Depends(verify_api_key)):
-    response = requests.get(f"https://api.trumail.io/v2/lookups/json?email={request.email}")
+    emailable_api_key = "live_aab71924040f64e4937d"  # Replace with your actual API key
+    response = requests.get(f"https://api.emailable.com/v1/verify?email={request.email}&api_key={emailable_api_key}")
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to validate email")
+
     return response.json()
+
 
 # 2. Currency Exchange API
 currency_rates = CurrencyRates()
 
+import requests
+
+EXCHANGE_API_KEY = "e44cb476a87835322e119885"  # Replace with your actual API key
+
 @app.get("/currency-exchange")
 def get_exchange_rate(from_currency: str, to_currency: str, api_key: str = Depends(verify_api_key)):
-    rate = currency_rates.get_rate(from_currency.upper(), to_currency.upper())
-    if not rate:
-        raise HTTPException(status_code=400, detail="Invalid currency pair")
-    return {"exchange_rate": rate}
+    url = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_API_KEY}/pair/{from_currency}/{to_currency}"
+
+    try:
+        print(f"Fetching exchange rate for {from_currency} → {to_currency}")  # Debugging
+        response = requests.get(url)
+        
+        print(f"Response Status Code: {response.status_code}")  # Debugging
+        print(f"Response Content: {response.text}")  # Debugging
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"External API error: {response.text}")
+
+        data = response.json()
+        
+        if "conversion_rate" not in data:
+            raise HTTPException(status_code=400, detail="Invalid currency pair or missing data")
+
+        return {"exchange_rate": data["conversion_rate"]}
+
+    except Exception as e:
+        print(f"❌ Exception occurred: {e}")  # Debugging
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 # 3. Invoice Generation API
 class InvoiceRequest(BaseModel):
@@ -47,19 +80,27 @@ class InvoiceRequest(BaseModel):
 
 @app.post("/generate-invoice")
 def generate_invoice(request: InvoiceRequest, api_key: str = Depends(verify_api_key)):
-    html = f"""
-    <html>
-        <body>
-            <h2>Invoice</h2>
-            <p><strong>From:</strong> {request.sender}</p>
-            <p><strong>To:</strong> {request.recipient}</p>
-            <p><strong>Amount:</strong> ${request.amount}</p>
-            <p><strong>Description:</strong> {request.description}</p>
-        </body>
-    </html>
-    """
-    pdf = pdfkit.from_string(html, False)
-    return {"pdf": pdf.hex()}  # Returning hex for simplicity
+    try:
+        buffer = BytesIO()
+        pdf = canvas.Canvas(buffer)
+
+        pdf.setFont("Helvetica-Bold", 16)
+        pdf.drawString(200, 800, "Invoice")
+
+        pdf.setFont("Helvetica", 12)
+        pdf.drawString(100, 750, f"From: {request.sender}")
+        pdf.drawString(100, 730, f"To: {request.recipient}")
+        pdf.drawString(100, 710, f"Amount: ${request.amount}")
+        pdf.drawString(100, 690, f"Description: {request.description}")
+
+        pdf.showPage()
+        pdf.save()
+
+        buffer.seek(0)
+        return Response(buffer.read(), media_type="application/pdf")
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 4. Phone Number Validation API
 class PhoneValidationRequest(BaseModel):
@@ -75,22 +116,3 @@ def validate_phone(request: PhoneValidationRequest, api_key: str = Depends(verif
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid phone number")
 
-# 5. Tax Calculator API
-TAX_RATES = {
-    "US": 0.07,
-    "UK": 0.20,
-    "EU": 0.19,
-    "CA": 0.13
-}  # Example tax rates
-
-class TaxCalculationRequest(BaseModel):
-    country: str
-    amount: Decimal
-
-@app.post("/calculate-tax")
-def calculate_tax(request: TaxCalculationRequest, api_key: str = Depends(verify_api_key)):
-    tax_rate = TAX_RATES.get(request.country.upper())
-    if tax_rate is None:
-        raise HTTPException(status_code=400, detail="Country not supported")
-    tax = request.amount * Decimal(tax_rate)
-    return {"tax_amount": round(tax, 2), "total_amount": round(request.amount + tax, 2)}
